@@ -367,17 +367,33 @@ def main():
     test_csv = data_dir / "test.csv"
     images_dir = data_dir / "images"
 
-    # Validate inputs
-    if not test_csv.exists():
-        log.error(f"test.csv not found at {test_csv}")
-        sys.exit(1)
+    # Resolve images directory — handle multiple folder structures:
+    #   1. data_dir/images/*.png  (standard)
+    #   2. data_dir/*.png         (flat — images uploaded directly)
     if not images_dir.exists():
-        log.error(f"images/ directory not found at {images_dir}")
-        sys.exit(1)
+        # Check if data_dir itself contains PNG files
+        pngs_in_root = sorted(data_dir.glob("*.png"))
+        if pngs_in_root:
+            log.info(f"No images/ subdirectory found — using {data_dir} directly")
+            images_dir = data_dir
+        else:
+            log.error(f"No images found. Checked {images_dir} and {data_dir}")
+            sys.exit(1)
 
-    # Load test set
-    df_test = pd.read_csv(test_csv)
-    log.info(f"Loaded {len(df_test)} questions from {test_csv}")
+    # Load test set — auto-generate from image files if test.csv is missing
+    if test_csv.exists():
+        df_test = pd.read_csv(test_csv)
+        log.info(f"Loaded {len(df_test)} questions from {test_csv}")
+    else:
+        log.info(f"test.csv not found — auto-discovering images from {images_dir}")
+        png_files = sorted(images_dir.glob("*.png"))
+        if not png_files:
+            log.error(f"No PNG images found in {images_dir}")
+            sys.exit(1)
+        # Build dataframe: image_name is the filename without extension
+        image_names = [f.stem for f in png_files]
+        df_test = pd.DataFrame({"image_name": image_names})
+        log.info(f"Found {len(df_test)} images: {image_names[:5]}{'...' if len(image_names) > 5 else ''}")
 
     # Setup device
     device_cfg = get_device_config()
