@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+*.egg
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Output
+submission.csv
+smoke_test_submission.csv
+
+# Model cache (don't push 17GB weights)
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Temp
+*.tmp
+*.log
