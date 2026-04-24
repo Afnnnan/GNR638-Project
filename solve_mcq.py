@@ -117,7 +117,7 @@ def get_device_config():
     if torch.cuda.is_available():
         log.info("CUDA detected — using GPU acceleration")
         # Check available VRAM to decide on quantization
-        vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         log.info(f"  GPU: {torch.cuda.get_device_name(0)} ({vram_gb:.1f} GB VRAM)")
 
         # Use flash_attention_2 if installed, otherwise fall back to sdpa
