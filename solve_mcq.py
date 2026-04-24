@@ -116,6 +116,10 @@ def get_device_config():
     """Auto-detect the best available device and return config dict."""
     if torch.cuda.is_available():
         log.info("CUDA detected — using GPU acceleration")
+        # Check available VRAM to decide on quantization
+        vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        log.info(f"  GPU: {torch.cuda.get_device_name(0)} ({vram_gb:.1f} GB VRAM)")
+
         # Use flash_attention_2 if installed, otherwise fall back to sdpa
         try:
             import flash_attn  # noqa: F401
@@ -124,21 +128,30 @@ def get_device_config():
         except ImportError:
             attn_impl = "sdpa"
             log.info("  FlashAttention2 not installed — using SDPA")
+
+        # 8B model needs ~16GB in float16; if VRAM < 20GB, use 4-bit quantization
+        use_4bit = vram_gb < 20
+        if use_4bit:
+            log.info(f"  VRAM < 20GB — will use 4-bit quantization (bnb)")
+        else:
+            log.info(f"  VRAM >= 20GB — using float16 (no quantization)")
+
         return {
             "device": "cuda",
             "device_map": "auto",
             "torch_dtype": torch.float16,
             "attn_implementation": attn_impl,
+            "use_4bit": use_4bit,
         }
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         log.info("MPS detected — using Apple Silicon GPU")
-        # MPS-specific settings
         os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
         return {
             "device": "mps",
-            "device_map": None,  # manual .to("mps")
-            "torch_dtype": torch.float16,  # bfloat16 limited on MPS
-            "attn_implementation": "sdpa",  # flash_attention_2 needs CUDA
+            "device_map": None,
+            "torch_dtype": torch.float16,
+            "attn_implementation": "sdpa",
+            "use_4bit": False,
         }
     else:
         log.warning("No GPU detected — falling back to CPU (will be slow!)")
@@ -147,6 +160,7 @@ def get_device_config():
             "device_map": None,
             "torch_dtype": torch.float32,
             "attn_implementation": "sdpa",
+            "use_4bit": False,
         }
 
 
@@ -161,11 +175,23 @@ def load_model(model_path: str, device_cfg: dict):
     t0 = time.time()
 
     load_kwargs = {
-        "dtype": device_cfg["torch_dtype"],
         "attn_implementation": device_cfg["attn_implementation"],
     }
     if device_cfg["device_map"] is not None:
         load_kwargs["device_map"] = device_cfg["device_map"]
+
+    # 4-bit quantization for GPUs with limited VRAM (e.g. T4 16GB)
+    if device_cfg.get("use_4bit"):
+        from transformers import BitsAndBytesConfig
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        log.info("  Using 4-bit NF4 quantization (bitsandbytes)")
+    else:
+        load_kwargs["dtype"] = device_cfg["torch_dtype"]
 
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         model_path, **load_kwargs
@@ -177,7 +203,12 @@ def load_model(model_path: str, device_cfg: dict):
 
     model.eval()
 
-    processor = AutoProcessor.from_pretrained(model_path)
+    # Limit image resolution to save VRAM
+    min_pixels = 256 * 28 * 28    # ~200K pixels
+    max_pixels = 1280 * 28 * 28   # ~1M pixels (default is higher)
+    processor = AutoProcessor.from_pretrained(
+        model_path, min_pixels=min_pixels, max_pixels=max_pixels
+    )
 
     log.info(f"Model loaded in {time.time() - t0:.1f}s")
     return model, processor
@@ -241,14 +272,20 @@ def answer_question(
         },
     ]
 
-    inputs = processor.apply_chat_template(
-        messages,
+    # enable_thinking may not be supported in all transformers versions
+    chat_kwargs = dict(
         tokenize=True,
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
-        enable_thinking=enable_thinking,
     )
+    try:
+        inputs = processor.apply_chat_template(
+            messages, **chat_kwargs, enable_thinking=enable_thinking,
+        )
+    except TypeError:
+        log.info("  enable_thinking not supported — using default")
+        inputs = processor.apply_chat_template(messages, **chat_kwargs)
     inputs = inputs.to(model.device)
 
     with torch.no_grad():
@@ -286,14 +323,12 @@ def answer_question(
         },
     ]
 
-    inputs_retry = processor.apply_chat_template(
-        messages_retry,
-        tokenize=True,
-        add_generation_prompt=True,
-        return_dict=True,
-        return_tensors="pt",
-        enable_thinking=False,  # no thinking on retry — keep it direct
-    )
+    try:
+        inputs_retry = processor.apply_chat_template(
+            messages_retry, **chat_kwargs, enable_thinking=False,
+        )
+    except TypeError:
+        inputs_retry = processor.apply_chat_template(messages_retry, **chat_kwargs)
     inputs_retry = inputs_retry.to(model.device)
 
     with torch.no_grad():
@@ -323,10 +358,12 @@ def answer_question(
 
 
 # ---------------------------------------------------------------------------
-# Clear GPU cache (helps with MPS memory)
+# Clear GPU cache (helps with MPS and limited-VRAM GPUs)
 # ---------------------------------------------------------------------------
 def clear_cache(device: str):
     """Free GPU memory between questions."""
+    import gc
+    gc.collect()
     if device == "cuda":
         torch.cuda.empty_cache()
     elif device == "mps":

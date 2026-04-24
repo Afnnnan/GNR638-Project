@@ -1,7 +1,7 @@
-torch>=2.1.0
-torchvision
-transformers @ git+https://github.com/huggingface/transformers
+transformers>=4.51.0
 accelerate
-qwen-vl-utils
+torch
 Pillow
 pandas
+qwen-vl-utils
+bitsandbytes
