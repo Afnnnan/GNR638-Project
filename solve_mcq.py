@@ -116,11 +116,19 @@ def get_device_config():
     """Auto-detect the best available device and return config dict."""
     if torch.cuda.is_available():
         log.info("CUDA detected — using GPU acceleration")
+        # Use flash_attention_2 if installed, otherwise fall back to sdpa
+        try:
+            import flash_attn  # noqa: F401
+            attn_impl = "flash_attention_2"
+            log.info("  FlashAttention2 available — using it")
+        except ImportError:
+            attn_impl = "sdpa"
+            log.info("  FlashAttention2 not installed — using SDPA")
         return {
             "device": "cuda",
             "device_map": "auto",
             "torch_dtype": torch.float16,
-            "attn_implementation": "flash_attention_2",
+            "attn_implementation": attn_impl,
         }
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         log.info("MPS detected — using Apple Silicon GPU")
